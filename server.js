@@ -51,49 +51,60 @@ const CATALOG_UPSTREAMS = [
 const STREAM_UPSTREAMS = [
   {
     key: "s1",
-    name: "Torrentio",
     baseUrl: "https://torrentio.strem.fun",
     types: ["movie", "series", "anime"]
   },
   {
     key: "s2",
-    name: "ThePirateBay+",
     baseUrl: "https://thepiratebay-plus.strem.fun",
     types: ["movie", "series"]
   },
   {
     key: "s3",
-    name: "TorrentsDB",
     baseUrl: "https://torrentsdb.com",
     types: ["movie", "series", "anime"]
   },
   {
     key: "s4",
-    name: "YTZVIO",
     baseUrl: "https://ytztvio.galacticcapsule.workers.dev",
     types: ["movie", "series"]
   },
   {
     key: "s5",
-    name: "ZMB Lite",
     baseUrl: "https://str.zmb.lat/lite",
     types: ["movie", "series"]
   },
   {
     key: "s6",
-    name: "StreamX",
     baseUrl: "https://streamx.electron.al",
     types: ["movie", "series"]
   },
   {
     key: "s7",
-    name: "NebulaStreams",
     baseUrl: "https://nebulastreams.onrender.com",
     types: ["movie", "series"]
+  },
+  {
+    key: "s8",
+    baseUrl: "https://comet.elfhosted.com",
+    types: ["movie", "series", "anime"]
+  },
+  {
+    key: "s9",
+    baseUrl: "https://94c8cb9f702d-brazuca-torrents.baby-beamup.club",
+    types: ["movie", "series", "anime"]
+  },
+  {
+    key: "s10",
+    baseUrl: "https://meteorfortheweebs.midnightignite.me/stremio",
+    types: ["movie", "series", "anime"]
   }
 ];
 
 const BRAND_PATTERNS = [
+  /\bcomet\b/gi,
+  /\bbrazuca(?:\s*torrents?)?\b/gi,
+  /\bmeteor(?:\s*for\s*the\s*weebs)?\b/gi,
   /\bnebula\s*streams?\b/gi,
   /\bnebulastreams?\b/gi,
   /\bstream\s*x\b/gi,
@@ -487,7 +498,7 @@ async function handleStream(req, res, route) {
       try {
         const payload = await fetchJson(url, STREAM_CACHE_TTL_MS);
         const streams = Array.isArray(payload.streams) ? payload.streams : [];
-        return streams.map((stream) => sanitizeStream(stream, upstream));
+        return streams.map((stream) => sanitizeStream(stream));
       } catch {
         return [];
       }
@@ -539,21 +550,18 @@ function sanitizeMeta(meta) {
   return next;
 }
 
-function sanitizeStream(stream, upstream) {
+function sanitizeStream(stream) {
   const next = { ...stream };
   const fallbackTitle = [stream.name, stream.title].filter(Boolean).join("\n");
   const peerCount = getPeerCount(stream);
-  const sourceName = getStreamSourceName(stream, upstream);
   setPeerCount(next, peerCount);
 
   next.name = BRAND;
   next.title = sanitizeText(stream.title || fallbackTitle || BRAND);
-  next.title = appendSourceInfo(next.title, sourceName);
   next.title = appendPeerInfo(next.title, peerCount);
 
   if (!next.title || next.title === BRAND) {
     next.title = BRAND;
-    next.title = appendSourceInfo(next.title, sourceName);
     next.title = appendPeerInfo(next.title, peerCount);
   }
 
@@ -565,7 +573,7 @@ function sanitizeStream(stream, upstream) {
     next.behaviorHints = { ...stream.behaviorHints };
     for (const [key, value] of Object.entries(next.behaviorHints)) {
       if (shouldBrandBehaviorHintKey(key)) {
-        next.behaviorHints[key] = sourceName || value;
+        next.behaviorHints[key] = BRAND;
       } else if (typeof value === "string") {
         next.behaviorHints[key] = sanitizeText(value);
       }
@@ -577,37 +585,6 @@ function sanitizeStream(stream, upstream) {
 
 function shouldBrandBehaviorHintKey(key) {
   return /^(addonName|indexerName|providerName|sourceName|trackerName)$/i.test(key);
-}
-
-function getStreamSourceName(stream, upstream) {
-  const fields = [
-    stream && stream.addonName,
-    stream && stream.indexerName,
-    stream && stream.providerName,
-    stream && stream.sourceName,
-    stream && stream.trackerName,
-    stream && stream.behaviorHints && stream.behaviorHints.addonName,
-    stream && stream.behaviorHints && stream.behaviorHints.indexerName,
-    stream && stream.behaviorHints && stream.behaviorHints.providerName,
-    stream && stream.behaviorHints && stream.behaviorHints.sourceName,
-    stream && stream.behaviorHints && stream.behaviorHints.trackerName,
-    upstream && upstream.name
-  ];
-
-  for (const value of fields) {
-    if (typeof value === "string" && value.trim()) {
-      return normalizeSourceName(value);
-    }
-  }
-
-  return null;
-}
-
-function normalizeSourceName(value) {
-  return value
-    .replace(/\s+/g, " ")
-    .replace(/^\[|\]$/g, "")
-    .trim();
 }
 
 function getPeerCount(stream) {
@@ -770,18 +747,6 @@ function appendPeerInfo(title, peerCount) {
 
 function titleHasPeerLabel(title) {
   return /(?:^|\n)\s*Peers:\s*[0-9]/i.test(title);
-}
-
-function appendSourceInfo(title, sourceName) {
-  if (!sourceName || titleHasSourceLabel(title)) {
-    return title;
-  }
-
-  return `${title}\nFonte: ${sourceName}`;
-}
-
-function titleHasSourceLabel(title) {
-  return /(?:^|\n)\s*Fonte:\s*\S/i.test(title);
 }
 
 function sanitizeText(value) {
