@@ -1,7 +1,7 @@
 {
-  "name": "stremio-fontes-bundle",
+  "name": "homeflix-stremio-addon",
   "version": "1.0.0",
-  "description": "Addon Stremio que agrega streams de fontes externas configuradas.",
+  "description": "HOMEFLIX Stremio add-on aggregator",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
