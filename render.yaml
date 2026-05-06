@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: homeflix
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: UPSTREAM_TIMEOUT_MS
+        value: "12000"
+      - key: STREAM_CACHE_TTL_MS
+        value: "90000"
+      - key: CATALOG_CACHE_TTL_MS
+        value: "600000"
+      - key: META_CACHE_TTL_MS
+        value: "3600000"
+      - key: STALE_CACHE_TTL_MS
+        value: "1800000"
+      - key: FETCH_RETRIES
+        value: "1"

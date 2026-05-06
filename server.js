@@ -6,9 +6,17 @@ const path = require("path");
 const { URL } = require("url");
 
 const BRAND = "HOMEFLIX";
-const PORT = Number(process.env.PORT || 7200);
-const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 12000);
+const VERSION = "1.0.1";
+const PORT = boundedInteger(process.env.PORT, 7200, 1, 65535);
+const UPSTREAM_TIMEOUT_MS = positiveNumber(process.env.UPSTREAM_TIMEOUT_MS, 12000);
+const FETCH_RETRIES = boundedInteger(process.env.FETCH_RETRIES, 1, 0, 3);
+const STREAM_CACHE_TTL_MS = positiveNumber(process.env.STREAM_CACHE_TTL_MS, 90000);
+const CATALOG_CACHE_TTL_MS = positiveNumber(process.env.CATALOG_CACHE_TTL_MS, 600000);
+const META_CACHE_TTL_MS = positiveNumber(process.env.META_CACHE_TTL_MS, 3600000);
+const STALE_CACHE_TTL_MS = positiveNumber(process.env.STALE_CACHE_TTL_MS, 1800000);
+const MAX_CACHE_ENTRIES = positiveNumber(process.env.MAX_CACHE_ENTRIES, 500);
 const LOGO_PATH = path.join(__dirname, "assets", "homeflix-logo.png");
+const PEER_SCORE = Symbol("homeflixPeerScore");
 
 const CATALOG_UPSTREAMS = [
   {
@@ -140,10 +148,15 @@ for (const upstream of CATALOG_UPSTREAMS) {
   }
 }
 
+const jsonCache = new Map();
+const inFlightJson = new Map();
+const manifestCache = new Map();
+let logoCache = null;
+
 function buildManifest(baseUrl) {
   return {
     id: "com.homeflix.addon",
-    version: "1.0.0",
+    version: VERSION,
     name: BRAND,
     description: "Catalogs and streams gathered in one add-on, with sources sorted by peers.",
     logo: `${baseUrl}/logo.png`,
@@ -175,6 +188,31 @@ function buildManifest(baseUrl) {
 
 function toPublicCatalogId(key, catalogId) {
   return `${key}-${catalogId}`;
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function boundedInteger(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function getManifest(baseUrl) {
+  const cached = manifestCache.get(baseUrl);
+  if (cached) {
+    return cached;
+  }
+
+  const manifest = buildManifest(baseUrl);
+  manifestCache.set(baseUrl, manifest);
+  return manifest;
 }
 
 function getBaseUrl(req) {
@@ -269,7 +307,59 @@ function buildUpstreamUrl(baseUrl, resource, type, id, extra) {
   return `${baseUrl.replace(/\/+$/, "")}/${pathParts.join("/")}`;
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, cacheTtlMs) {
+  const now = Date.now();
+  const cached = jsonCache.get(url);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.payload;
+  }
+
+  const activeRequest = inFlightJson.get(url);
+  if (activeRequest) {
+    return activeRequest;
+  }
+
+  const request = fetchJsonUncached(url)
+    .then((payload) => {
+      setJsonCache(url, payload, cacheTtlMs);
+      return payload;
+    })
+    .catch((error) => {
+      if (cached && cached.staleUntil > Date.now()) {
+        return cached.payload;
+      }
+
+      throw error;
+    })
+    .finally(() => {
+      inFlightJson.delete(url);
+    });
+
+  inFlightJson.set(url, request);
+  return request;
+}
+
+async function fetchJsonUncached(url) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
+    try {
+      return await fetchJsonOnce(url);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= FETCH_RETRIES || !shouldRetryFetch(error)) {
+        break;
+      }
+
+      await delay(120 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+async function fetchJsonOnce(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
@@ -277,17 +367,74 @@ async function fetchJson(url) {
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
-        "User-Agent": `${BRAND}/1.0 StremioAddon`
+        "User-Agent": `${BRAND}/${VERSION} StremioAddon`
       }
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      const error = new Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
 
     return await response.json();
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function shouldRetryFetch(error) {
+  if (!error) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return false;
+  }
+
+  if (typeof error.status === "number") {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+
+  return true;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function setJsonCache(url, payload, ttlMs) {
+  if (!ttlMs || ttlMs <= 0) {
+    return;
+  }
+
+  const now = Date.now();
+  pruneJsonCache(now);
+  jsonCache.set(url, {
+    payload,
+    expiresAt: now + ttlMs,
+    staleUntil: now + ttlMs + STALE_CACHE_TTL_MS
+  });
+}
+
+function pruneJsonCache(now) {
+  if (jsonCache.size < MAX_CACHE_ENTRIES) {
+    return;
+  }
+
+  for (const [url, entry] of jsonCache) {
+    if (entry.staleUntil <= now) {
+      jsonCache.delete(url);
+    }
+  }
+
+  while (jsonCache.size >= MAX_CACHE_ENTRIES) {
+    const oldest = jsonCache.keys().next().value;
+    if (!oldest) {
+      return;
+    }
+
+    jsonCache.delete(oldest);
   }
 }
 
@@ -303,7 +450,7 @@ async function handleCatalog(req, res, route) {
   const url = buildUpstreamUrl(upstream.baseUrl, "catalog", route.type, catalog.id, route.extra);
 
   try {
-    const payload = await fetchJson(url);
+    const payload = await fetchJson(url, CATALOG_CACHE_TTL_MS);
     sendJson(res, 200, sanitizeCatalogPayload(payload));
   } catch (error) {
     sendJson(res, 200, { metas: [], error: `Falha ao carregar catalogo ${route.id}` });
@@ -317,7 +464,7 @@ async function handleMeta(req, res, route) {
     const url = buildUpstreamUrl(upstream.baseUrl, "meta", route.type, route.id, route.extra);
 
     try {
-      const payload = await fetchJson(url);
+      const payload = await fetchJson(url, META_CACHE_TTL_MS);
       if (payload && payload.meta) {
         sendJson(res, 200, sanitizeMetaPayload(payload));
         return;
@@ -336,7 +483,7 @@ async function handleStream(req, res, route) {
     .map(async (upstream) => {
       const url = buildUpstreamUrl(upstream.baseUrl, "stream", route.type, route.id, route.extra);
       try {
-        const payload = await fetchJson(url);
+        const payload = await fetchJson(url, STREAM_CACHE_TTL_MS);
         const streams = Array.isArray(payload.streams) ? payload.streams : [];
         return streams.map((stream) => sanitizeStream(stream));
       } catch {
@@ -393,7 +540,8 @@ function sanitizeMeta(meta) {
 function sanitizeStream(stream) {
   const next = { ...stream };
   const fallbackTitle = [stream.name, stream.title].filter(Boolean).join("\n");
-  const peerCount = extractPeerCount(stream);
+  const peerCount = getPeerCount(stream);
+  setPeerCount(next, peerCount);
 
   next.name = BRAND;
   next.title = sanitizeText(stream.title || fallbackTitle || BRAND);
@@ -424,6 +572,32 @@ function sanitizeStream(stream) {
 
 function shouldBrandBehaviorHintKey(key) {
   return /^(addonName|indexerName|providerName|sourceName|trackerName)$/i.test(key);
+}
+
+function getPeerCount(stream) {
+  if (!stream || typeof stream !== "object") {
+    return null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(stream, PEER_SCORE)) {
+    return stream[PEER_SCORE];
+  }
+
+  const peerCount = extractPeerCount(stream);
+  setPeerCount(stream, peerCount);
+  return peerCount;
+}
+
+function setPeerCount(stream, peerCount) {
+  if (!stream || typeof stream !== "object") {
+    return;
+  }
+
+  Object.defineProperty(stream, PEER_SCORE, {
+    value: peerCount,
+    enumerable: false,
+    configurable: true
+  });
 }
 
 function extractPeerCount(stream) {
@@ -503,14 +677,7 @@ function parsePeerNumber(value) {
   }
 
   const suffix = match[2].toLowerCase();
-  let numeric = match[1];
-
-  if (numeric.includes(",") && numeric.includes(".")) {
-    numeric = numeric.replace(/,/g, "");
-  } else if (numeric.includes(",") && !numeric.includes(".")) {
-    numeric = numeric.replace(/,/g, "");
-  }
-
+  const numeric = normalizePeerNumeric(match[1], suffix);
   const parsed = Number(numeric);
   if (!Number.isFinite(parsed)) {
     return null;
@@ -518,6 +685,43 @@ function parsePeerNumber(value) {
 
   const multiplier = suffix === "m" ? 1000000 : suffix === "k" ? 1000 : 1;
   return Math.max(0, Math.round(parsed * multiplier));
+}
+
+function normalizePeerNumeric(value, suffix) {
+  const commaCount = (value.match(/,/g) || []).length;
+  const dotCount = (value.match(/\./g) || []).length;
+
+  if (commaCount + dotCount === 0) {
+    return value;
+  }
+
+  if (commaCount > 1 && dotCount === 0) {
+    return value.replace(/,/g, "");
+  }
+
+  if (dotCount > 1 && commaCount === 0) {
+    return value.replace(/\./g, "");
+  }
+
+  if (commaCount && dotCount) {
+    const decimalIndex = Math.max(value.lastIndexOf(","), value.lastIndexOf("."));
+    const tail = value.slice(decimalIndex + 1);
+
+    if (suffix && tail.length <= 2) {
+      return `${value.slice(0, decimalIndex).replace(/[.,]/g, "")}.${tail.replace(/[.,]/g, "")}`;
+    }
+
+    return value.replace(/[.,]/g, "");
+  }
+
+  const separator = commaCount ? "," : ".";
+  const [head, tail] = value.split(separator);
+
+  if (tail.length === 3) {
+    return `${head}${tail}`;
+  }
+
+  return `${head}.${tail}`;
 }
 
 function appendPeerInfo(title, peerCount) {
@@ -581,7 +785,7 @@ function sortStreamsByPeers(streams) {
     .map((stream, index) => ({
       stream,
       index,
-      peers: extractPeerCount(stream)
+      peers: getPeerCount(stream)
     }))
     .sort((a, b) => {
       const left = a.peers === null ? -1 : a.peers;
@@ -641,7 +845,35 @@ function handleRoot(req, res) {
   sendText(res, 200, body, "text/html; charset=utf-8");
 }
 
-const server = http.createServer(async (req, res) => {
+function handleLogo(res) {
+  if (logoCache) {
+    sendBuffer(res, 200, logoCache, "image/png");
+    return;
+  }
+
+  fs.readFile(LOGO_PATH, (error, data) => {
+    if (error) {
+      sendText(res, 200, logoSvg(), "image/svg+xml; charset=utf-8");
+      return;
+    }
+
+    logoCache = data;
+    sendBuffer(res, 200, data, "image/png");
+  });
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    if (res.headersSent) {
+      res.destroy(error);
+      return;
+    }
+
+    sendJson(res, 500, { error: "Internal server error" });
+  });
+});
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = url.pathname;
 
@@ -660,20 +892,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/health" || pathname === "/healthz") {
+    sendJson(res, 200, {
+      ok: true,
+      name: BRAND,
+      version: VERSION,
+      uptime: Math.round(process.uptime())
+    });
+    return;
+  }
+
   if (pathname === "/manifest.json") {
-    sendJson(res, 200, buildManifest(getBaseUrl(req)));
+    sendJson(res, 200, getManifest(getBaseUrl(req)));
     return;
   }
 
   if (pathname === "/logo.png") {
-    fs.readFile(LOGO_PATH, (error, data) => {
-      if (error) {
-        sendText(res, 200, logoSvg(), "image/svg+xml; charset=utf-8");
-        return;
-      }
-
-      sendBuffer(res, 200, data, "image/png");
-    });
+    handleLogo(res);
     return;
   }
 
@@ -707,8 +942,8 @@ const server = http.createServer(async (req, res) => {
     await handleStream(req, res, route);
     return;
   }
-});
+}
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`${BRAND} Stremio addon running at http://localhost:${PORT}/manifest.json`);
 });
