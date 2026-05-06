@@ -6,7 +6,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const BRAND = "HOMEFLIX";
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 const PORT = boundedInteger(process.env.PORT, 7200, 1, 65535);
 const UPSTREAM_TIMEOUT_MS = positiveNumber(process.env.UPSTREAM_TIMEOUT_MS, 12000);
 const FETCH_RETRIES = boundedInteger(process.env.FETCH_RETRIES, 1, 0, 3);
@@ -159,7 +159,7 @@ function buildManifest(baseUrl) {
     version: VERSION,
     name: BRAND,
     description: "Catalogs and streams gathered in one add-on, with sources sorted by peers.",
-    logo: `${baseUrl}/logo.png`,
+    logo: `${baseUrl}/logo.png?v=${VERSION}`,
     background: `${baseUrl}/background.svg`,
     resources: [
       "catalog",
@@ -228,9 +228,9 @@ function sendJson(res, statusCode, payload) {
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS"
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
   });
-  res.end(body);
+  res.end(res.isHeadRequest ? undefined : body);
 }
 
 function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-8") {
@@ -239,9 +239,9 @@ function sendText(res, statusCode, body, contentType = "text/plain; charset=utf-
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS"
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
   });
-  res.end(body);
+  res.end(res.isHeadRequest ? undefined : body);
 }
 
 function sendBuffer(res, statusCode, body, contentType) {
@@ -250,9 +250,9 @@ function sendBuffer(res, statusCode, body, contentType) {
     "Content-Length": body.length,
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS"
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
   });
-  res.end(body);
+  res.end(res.isHeadRequest ? undefined : body);
 }
 
 function stripJsonSuffix(value) {
@@ -876,13 +876,14 @@ const server = http.createServer((req, res) => {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = url.pathname;
+  res.isHeadRequest = req.method === "HEAD";
 
   if (req.method === "OPTIONS") {
     sendText(res, 204, "");
     return;
   }
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "HEAD") {
     sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
