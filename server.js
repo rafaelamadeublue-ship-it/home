@@ -6,7 +6,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const BRAND = "HOMEFLIX";
-const VERSION = "1.0.4";
+const VERSION = "1.0.5";
 const PORT = boundedInteger(process.env.PORT, 7200, 1, 65535);
 const UPSTREAM_TIMEOUT_MS = positiveNumber(process.env.UPSTREAM_TIMEOUT_MS, 12000);
 const FETCH_RETRIES = boundedInteger(process.env.FETCH_RETRIES, 1, 0, 3);
@@ -161,18 +161,10 @@ function buildManifest(baseUrl) {
     version: VERSION,
     name: BRAND,
     description: "Catalogs and streams gathered in one add-on, with sources sorted by peers.",
+    endpoint: baseUrl,
     logo: `${baseUrl}${LOGO_PUBLIC_PATH}`,
-    background: `${baseUrl}/background.svg`,
-    resources: [
-      "catalog",
-      "meta",
-      {
-        name: "stream",
-        types: ["movie", "series", "anime"],
-        idPrefixes: ["tt", "kitsu"]
-      }
-    ],
-    types: ["movie", "series", "anime", "other"],
+    resources: ["catalog", "meta", "stream"],
+    types: ["movie", "series", "anime"],
     catalogs: CATALOG_UPSTREAMS.flatMap((upstream) =>
       upstream.catalogs.map((catalog) => ({
         type: catalog.type,
@@ -813,6 +805,11 @@ function backgroundSvg() {
 
 function handleRoot(req, res) {
   const baseUrl = getBaseUrl(req);
+  if (wantsJson(req)) {
+    sendJson(res, 200, getManifest(baseUrl));
+    return;
+  }
+
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -837,6 +834,16 @@ function handleRoot(req, res) {
 </html>`;
 
   sendText(res, 200, body, "text/html; charset=utf-8");
+}
+
+function wantsJson(req) {
+  const accept = String(req.headers.accept || "");
+  const userAgent = String(req.headers["user-agent"] || "");
+
+  return (
+    accept.includes("application/json") ||
+    /stremio|stremio-addons|bot|crawler|spider|curl|wget/i.test(userAgent)
+  );
 }
 
 function readLogo(callback) {
@@ -912,11 +919,6 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (pathname === "/" || pathname === "") {
-    handleRoot(req, res);
-    return;
-  }
-
   if (pathname === "/health" || pathname === "/healthz") {
     sendJson(res, 200, {
       ok: true,
@@ -927,8 +929,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (pathname === "/manifest.json") {
+  if (pathname === "/manifest.json" || pathname === "/manifest") {
     sendJson(res, 200, getManifest(getBaseUrl(req)));
+    return;
+  }
+
+  if (pathname === "/" || pathname === "") {
+    handleRoot(req, res);
     return;
   }
 
