@@ -6,7 +6,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const BRAND = "HOMEFLIX";
-const VERSION = "1.0.2";
+const VERSION = "1.0.3";
 const PORT = boundedInteger(process.env.PORT, 7200, 1, 65535);
 const UPSTREAM_TIMEOUT_MS = positiveNumber(process.env.UPSTREAM_TIMEOUT_MS, 12000);
 const FETCH_RETRIES = boundedInteger(process.env.FETCH_RETRIES, 1, 0, 3);
@@ -159,7 +159,7 @@ function buildManifest(baseUrl) {
     version: VERSION,
     name: BRAND,
     description: "Catalogs and streams gathered in one add-on, with sources sorted by peers.",
-    logo: `${baseUrl}/logo.png?v=${VERSION}`,
+    logo: `${baseUrl}/homeflix-logo-v${VERSION}.png`,
     background: `${baseUrl}/background.svg`,
     resources: [
       "catalog",
@@ -253,6 +253,16 @@ function sendBuffer(res, statusCode, body, contentType) {
     "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
   });
   res.end(res.isHeadRequest ? undefined : body);
+}
+
+function redirect(res, location, statusCode = 302) {
+  res.writeHead(statusCode, {
+    Location: location,
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
+  });
+  res.end();
 }
 
 function stripJsonSuffix(value) {
@@ -800,14 +810,6 @@ function sortStreamsByPeers(streams) {
     .map((entry) => entry.stream);
 }
 
-function logoSvg() {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#111827"/>
-  <path d="M117 139h278L279 256l116 117H117l116-117L117 139Z" fill="#b91c1c"/>
-  <path d="M156 173h158L198 339h158" fill="none" stroke="#fff7ed" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>`;
-}
-
 function backgroundSvg() {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080">
   <rect width="1920" height="1080" fill="#111827"/>
@@ -853,7 +855,7 @@ function handleLogo(res) {
 
   fs.readFile(LOGO_PATH, (error, data) => {
     if (error) {
-      sendText(res, 200, logoSvg(), "image/svg+xml; charset=utf-8");
+      sendJson(res, 404, { error: "Logo file not found" });
       return;
     }
 
@@ -908,13 +910,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (pathname === "/logo.png") {
+  if (pathname === "/logo.png" || pathname === `/homeflix-logo-v${VERSION}.png`) {
     handleLogo(res);
     return;
   }
 
   if (pathname === "/logo.svg") {
-    sendText(res, 200, logoSvg(), "image/svg+xml; charset=utf-8");
+    redirect(res, `/homeflix-logo-v${VERSION}.png`);
     return;
   }
 
