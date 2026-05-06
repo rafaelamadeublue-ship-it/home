@@ -6,7 +6,7 @@ const path = require("path");
 const { URL } = require("url");
 
 const BRAND = "HOMEFLIX";
-const VERSION = "1.0.3";
+const VERSION = "1.0.4";
 const PORT = boundedInteger(process.env.PORT, 7200, 1, 65535);
 const UPSTREAM_TIMEOUT_MS = positiveNumber(process.env.UPSTREAM_TIMEOUT_MS, 12000);
 const FETCH_RETRIES = boundedInteger(process.env.FETCH_RETRIES, 1, 0, 3);
@@ -16,6 +16,7 @@ const META_CACHE_TTL_MS = positiveNumber(process.env.META_CACHE_TTL_MS, 3600000)
 const STALE_CACHE_TTL_MS = positiveNumber(process.env.STALE_CACHE_TTL_MS, 1800000);
 const MAX_CACHE_ENTRIES = positiveNumber(process.env.MAX_CACHE_ENTRIES, 500);
 const LOGO_PATH = path.join(__dirname, "assets", "homeflix-logo.png");
+const LOGO_PUBLIC_PATH = "/homeflix-logo.png";
 const PEER_SCORE = Symbol("homeflixPeerScore");
 
 const CATALOG_UPSTREAMS = [
@@ -152,6 +153,7 @@ const jsonCache = new Map();
 const inFlightJson = new Map();
 const manifestCache = new Map();
 let logoCache = null;
+let logoSvgCache = null;
 
 function buildManifest(baseUrl) {
   return {
@@ -159,7 +161,7 @@ function buildManifest(baseUrl) {
     version: VERSION,
     name: BRAND,
     description: "Catalogs and streams gathered in one add-on, with sources sorted by peers.",
-    logo: `${baseUrl}/homeflix-logo-v${VERSION}.png`,
+    logo: `${baseUrl}${LOGO_PUBLIC_PATH}`,
     background: `${baseUrl}/background.svg`,
     resources: [
       "catalog",
@@ -253,16 +255,6 @@ function sendBuffer(res, statusCode, body, contentType) {
     "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
   });
   res.end(res.isHeadRequest ? undefined : body);
-}
-
-function redirect(res, location, statusCode = 302) {
-  res.writeHead(statusCode, {
-    Location: location,
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS"
-  });
-  res.end();
 }
 
 function stripJsonSuffix(value) {
@@ -847,20 +839,50 @@ function handleRoot(req, res) {
   sendText(res, 200, body, "text/html; charset=utf-8");
 }
 
-function handleLogo(res) {
+function readLogo(callback) {
   if (logoCache) {
-    sendBuffer(res, 200, logoCache, "image/png");
+    callback(null, logoCache);
     return;
   }
 
   fs.readFile(LOGO_PATH, (error, data) => {
     if (error) {
-      sendJson(res, 404, { error: "Logo file not found" });
+      callback(error);
       return;
     }
 
     logoCache = data;
+    callback(null, data);
+  });
+}
+
+function handleLogo(res) {
+  readLogo((error, data) => {
+    if (error) {
+      sendJson(res, 404, { error: "Logo file not found" });
+      return;
+    }
+
     sendBuffer(res, 200, data, "image/png");
+  });
+}
+
+function handleLogoSvg(res) {
+  if (logoSvgCache) {
+    sendText(res, 200, logoSvgCache, "image/svg+xml; charset=utf-8");
+    return;
+  }
+
+  readLogo((error, data) => {
+    if (error) {
+      sendJson(res, 404, { error: "Logo file not found" });
+      return;
+    }
+
+    logoSvgCache = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <image href="data:image/png;base64,${data.toString("base64")}" width="1024" height="1024"/>
+</svg>`;
+    sendText(res, 200, logoSvgCache, "image/svg+xml; charset=utf-8");
   });
 }
 
@@ -910,13 +932,18 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (pathname === "/logo.png" || pathname === `/homeflix-logo-v${VERSION}.png`) {
+  if (
+    pathname === "/logo.png" ||
+    pathname === LOGO_PUBLIC_PATH ||
+    pathname === "/assets/homeflix-logo.png" ||
+    pathname === `/homeflix-logo-v${VERSION}.png`
+  ) {
     handleLogo(res);
     return;
   }
 
   if (pathname === "/logo.svg") {
-    redirect(res, `/homeflix-logo-v${VERSION}.png`);
+    handleLogoSvg(res);
     return;
   }
 
