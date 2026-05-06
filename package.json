@@ -1,11 +1,11 @@
 {
-  "name": "homeflix-render",
+  "name": "homeflix-stremio-addon",
   "version": "1.0.6",
-  "description": "Render entry point for the HOMEFLIX Stremio add-on",
-  "main": "HOMEFLIX/server.js",
+  "description": "HOMEFLIX Stremio add-on aggregator",
+  "main": "server.js",
   "scripts": {
-    "start": "node HOMEFLIX/server.js",
-    "check": "node --check HOMEFLIX/server.js"
+    "start": "node server.js",
+    "check": "node --check server.js"
   },
   "engines": {
     "node": ">=18"
